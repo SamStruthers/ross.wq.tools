@@ -1,4 +1,4 @@
-#' ROSS WQ QAQC: Quality Assurance and Quality Control for Poudre Sonde Network Data
+#' ROSS WQ TOOLS: Quality Assurance and Quality Control for Poudre Sonde Network Data
 #'
 #' Tools for processing, flagging, and analyzing water quality data
 #' from the Fort Collins Watershed monitoring network. This package provides
