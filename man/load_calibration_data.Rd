@@ -5,7 +5,7 @@
 \title{Load Calibration Data}
 \usage{
 load_calibration_data(
-  cal_data_file_path = here("data", "calibration_reports", "0_cal_data_munge",
+  cal_data_file_path = here::here("data", "collated", "sensor", "cal_reports",
     "munged_calibration_data.RDS"),
   update = FALSE,
   ...

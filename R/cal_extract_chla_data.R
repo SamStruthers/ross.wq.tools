@@ -58,38 +58,8 @@ cal_extract_chla_data <- function(div) {
     calibration_coefs <- NULL
   }
 
-  # Driftr calibration input
-  # Check if the table we expect for the calibration coefficients exists in the structure we expect...
-  driftr_data_check <- cal_div_table_check(
-    table_list = div_tables,
-    table_name = "calibration_point_1",
-    col_names = c("pre_measurement", "post_measurement")
-  )
-
-  if(driftr_data_check) {
-
-    driftr_data <- div_tables[["calibration_point_1"]] %>%
-      pivot_wider(names_from = X1, values_from = X2, names_repair = make_clean_names) %>%
-      select(pre_measurement, post_measurement)
-
-    driftr_input <- tibble(point = c(1), bind_rows(driftr_data)) %>%
-      mutate(
-        units = word(post_measurement, 2),
-        across(c(pre_measurement, post_measurement), ~word(.x, 1)), # get rid of units
-        across(c(pre_measurement, post_measurement), ~gsub(",", "", .x)), # get rid of commas
-        across(c(pre_measurement, post_measurement), ~as.numeric(.x)) # convert to numeric
-      )
-
-  } else {
-    driftr_input <- NULL
-  }
-
   # Return
-  chla_cal_info <- tibble(
-    div_metadata,
-    calibration_coefs = list(calibration_coefs),
-    driftr_input = list(driftr_input)
-  )
+  chla_cal_info <- bind_cols(div_metadata, calibration_coefs)
 
   return(chla_cal_info)
 }

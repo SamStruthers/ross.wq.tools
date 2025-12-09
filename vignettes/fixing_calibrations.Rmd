@@ -10,6 +10,19 @@ quality sensor data using calibration information extracted from HTML calibratio
 files. The process corrects sensor drift and applies temporal interpolation 
 between calibrations to produce accurate time series data.
 
+This vignette will also demonstrate when the back-calibrations work effectively 
+and when they do not. 
+
+# Overview
+
+There are 4 steps in this workflow, and each step usually has some sub-steps within
+it. The first step is to extract the relevant calibration data from the calibration 
+HTML files that are provided by In-Situ. The next step is to join this calibration
+data to the sensor data. Then we use this joined data to prepare the data to be 
+back calibrated by splitting it into "calibration windows". Finally, we back-calibrate
+the data using these windows, and combine it back into its original site-parameter-year
+group. 
+
 # Prepare Environment
 ```{r setup}
 knitr::opts_chunk$set(
@@ -34,7 +47,8 @@ invisible(
     "devtools", # For downloading GitHub packages
     "remotes",
     "yaml",
-    "arrow" # reading parquet files
+    "arrow", # reading parquet files
+    "groupdata2"
   ),
   function(x) {
     if (x %in% installed.packages()) {
@@ -58,24 +72,15 @@ sources all calibration functions needed for the workflow.
 
 # Load Calibration Data
 
-This pulls the data with the calibration provenance in it.
+This pulls the data with the calibration succession in it.
 
 ```{r load-cal-data}
+# TODO: still need to find the right measure to determine if a calibration is bad 
 load_calibration_data(
   cal_data_file_path = here::here("data", "collated", "sensor", "cal_reports", "munged_calibration_data.RDS"),
   update = TRUE,
-  field_cal_dir = here::here("data", "raw", "sensor", "calibration_reports"),
-  benchtop_cal_dir = here::here("data", "raw","sensor", "calibration_reports", "benchtop_calibrations")
+  field_cal_dir = here::here("data", "raw", "sensor", "calibration_reports")
 )
-
-# TODO: incorporate pH back calibrations
-# TODO: still need to find the right measure to determine if a calibration is bad 
-
-# Temporarily remove pH to test this
-calibration_data <- calibration_data %>%
-  map(function(year_list){
-    year_list[!str_detect(names(year_list), "pH")]
-  })
 ```
 
 The `load_calibration_data()` function loads the calibration coefficients and 
@@ -84,26 +89,44 @@ if they exist within the file path which is provided to it.
 
 If the data does not exist, or the `update` option is set to `TRUE`, this function 
 calls the `cal_extract_markup_data()`, which generates this calibration data 
-fresh from raw HTML files from the directory provided to it. By default these 
-directories are: `field_cal_dir = here("data", "calibration_reports")` and
-`benchtop_cal_dir = here("data", "calibration_reports", "benchtop_calibrations")`.
+fresh from raw HTML files from the directory provided to it. By default this 
+directory is: `field_cal_dir = here("data", "calibration_reports")`.
 Though, note that the arguments for `cal_extract_markup_data()` can be changed 
 within `load_calibration_data()` via the `...` arguments. Note that `cal_extract_markup_data()`
 takes a minute to finish running.
 
 `cal_extract_markup_data()` will establish "calibration succession" when it pulls
-in the HTML data. Here "calibration succession" means that it will find the next
-correct calibration that is tied to the current calibration. This is done in order
-to correctly back calibrate data without using bad calibrations.
+in the HTML data. Here "calibration succession" means the following correct calibration
+for the current sensor's calibration. This is necessary to correctly back calibrate 
+data without using bad calibrations or calibrations from the wrong sensor.
 
 ## Calibration Data Structure
 
 The resulting `calibration_data` object follows an organizational structure 
 which contains a nested list organized by year, where each year 
 contains site-parameter combinations (e.g., "lincoln-pH", "tamasag-Turbidity"). 
-Each site-parameter entry includes calibration coefficients (slope and offset values) 
-and drift correction measurements (pre- and post-calibration standard readings),
-along with their related identification and datetime information.
+
+Each site-parameter entry includes:
+
+- site: Name of the site where the sensor was at the creation of the calibration file, 
+according to the file name of the calibration file.
+- sensor: Name of the sensor, according to the sensor's calibration information in the calibration file. 
+- file_date: Date in the file name of the calibration file that the information came from
+- sonde_date: Date that the calibration file was created, according to the information in the calibration file.
+- sensor_date: Date when the sensor was calibrated, according to the information in the calibration file.
+- sonde_serial: Serial number for the sonde.
+- sensor_serial: Serial number for the sensor.
+- slope: The slope calibration coefficient for the current calibration.
+- offset: The offset calibration coefficient for the current calibration.
+- units: Units of the slope and offset.
+- slope_units: Units specifically for slope (for pH)
+- offset_units: Units specifically for offset (for pH)
+- point: Specifies which calibration point the information is for. For multi-point calibrations (pH).
+- correct calibration: Whether or not the current calibration information is correct.
+- sensor_date_lead: The following date when the sensor was correctly calibrated.
+- slope_lead: The following slope calibration coefficient when the sensor was correctly calibrated.
+- offset_lead: The following offset calibration coefficient when the sensor was correctly calibrated.
+- correct_calibration_lead: Whether or not the follwoing calibration information is correct.
 
 # Load Sensor Data
 
@@ -137,35 +160,33 @@ sensor_calibration_data <- cal_join_sensor_calibration_data(
 ```
 
 The `join_sensor_calibration_data()` function links each sensor measurement to 
-its appropriate calibration information using temporal proximity matching. This 
-function identifies the most recent calibration that applies to each sensor 
-reading, creating a foundation for the back-calibration process.
+its appropriate calibration information using temporal proximity matching. Though
+there are many strategies to join this the calibration information to the sensor
+data, we are currently finding the most recent calibration that precedes or equals
+the sensor measurement time. Ideally, we would want to join based the closest
+available site visit, but this unfortunately has issues that we have not been 
+able to square away. This is a sufficient foundation for the back-calibration
+process.
 
 ## Prepare Data for Back Calibration
 
-OLD INFO, for context of progress. The workflow has changed, but I want to keep this
-here as a refresher on the previous update and for context on this update.
+We need to prepare the joined sensor-calibration data before we can back-calibrate it.
+There are some preparations that we need to handle here that were not handled 
+during the calibration information extraction step because now that information is 
+joined to sensor readings that we are going to change with back-calibration. 
 
-"""
-There are some notes in the updated `cal_prepare_sensor_calibration_data` function,
-but once this is finalized those will be gone. This will also get cleaned up,
-but I want to explain what I did so that it can be critiqued easily. Some version 
-of this will also be in the draft PR.
+First, we convert all the sensor reading data back to "raw" readings, if they are able to be 
+converted back using some useful calibration. Otherwise, the sensor reading data
+is left as is and is prevented from updating during the downstream back-calibration
+step. Once that is complete, we fill in the slope and offset coefficient data with 
+the correct coefficients, according to our calibration annotation step. We then
+split the data up into "calibration windows" which are windows of data that are bounded
+by sequential correct calibrations. Each window represents 
+a time period where linear interpolation between two calibrations can be applied. 
 
-Okay. The previous solution had us binding consecutive "calibration chunks" together
-so that we would be able to go from one calibration to the next. This update simplifies
-this process a lot. Instead of doing that we make the `cal_provenance_df` object
-that has a "lead" sensor calibration date and calibration coefs column that we use 
-to join with the calibration chunks that we make in `cal_prepare_sensor_calibration_data`.
-The code updates that follow just require pointing at a new part of the df that 
-gets passed into the functions that are called in cal_back calibrate.
-"""
-
-NEW UPDATE:
-Instead of using the calibration provenance data frame, now calibration succession
-is established in `cal_extract_markup()` and tracked with the calibration data.
-Successive, sensor specific calibrations are still used, but now with the addition
-of identifying bad calibrations in order to calibrate with the correct calibrations.
+This process converts the appropriate data back to "raw" (while preserving those
+data that are unable to be back-calibrated), and then groups the data so that 
+bad calibrations are able to be back-calibrated using relevant good calibrations.
 
 ```{r prep-data}
 prepped_snsr_cal_data <- cal_prepare_calibration_windows(
@@ -173,18 +194,17 @@ prepped_snsr_cal_data <- cal_prepare_calibration_windows(
 )
 ```
 
-The `prepare_sensor_calibration_data()` function segments the joined data into 
-calibration windows bounded by consecutive correct calibrations. Each window represents 
-a time period where linear interpolation between two calibrations can be applied. 
-This segmentation creates manageable chunks that allow for temporal weighting of 
-calibration parameters.
-
-Those calibration windows which are bounded by consecutive calibrations, but
-which start with a bad calibration that cannot be corrected into a correct calibration
-are not converted to their raw values, and they are prevented from being manipulated
-in downstream back calibration functions.
-
 # Back Calibration
+
+Finally, we are able to back-calibrate the data. The process for back-calibration
+starts with creating a temporal weight to mix the two sequential calibration periods
+through time. Then, we use this information to transition the data from one calibration
+period to the next. Basically, we start with the former calibration weighted maximally,
+and the latter calibration weighted minimally and linearly transition to the latter
+calibration weighted maximally, and the former calibration weighted minimally. Note
+that we are mixing these calibrations, as the middle step in this process would weigh
+both calibrations equally. Finally, there is a verification step to check which 
+calibrations were successful and which failed.
 
 ```{r Apply back calibration functions to the data}
 calibrated_data <- prepped_snsr_cal_data %>% 
@@ -211,7 +231,8 @@ iterations internally, they abstract away this complexity from the user.
 The explicit nested structure in  the `back_calibration()` function call serves 
 a purpose for future functionality. While automated calibration works well for 
 most situations, some sensor data may require manual intervention or custom 
-calibration approaches. The exposed nested maps allow users to easily extract 
+calibration approaches, especially as we find errors during manual verification.
+The exposed nested maps allow users to easily extract 
 specific years, site-parameters, or individual chunks for manual processing 
 while maintaining the overall automated workflow for standard cases.
 
@@ -219,14 +240,9 @@ while maintaining the overall automated workflow for standard cases.
 
 The `cal_back_calibrate()` function serves as the orchestrator for the calibration 
 process within each chunk. It automatically determines the appropriate calibration 
-workflow based on the sensor parameter type. Standard sensors (Chlorophyll-a, 
-FDOM, ORP, Pressure, Specific Conductivity, RDO) follow a three-step process 
-involving temporal weighting and linear transformation back to corrected values, 
-with a final validation step.
-
-This function design ensures that users only need to call one function per chunk 
-while the internal logic handles the complexity of parameter-specific calibration 
-requirements.
+workflow based on the sensor parameter type. This function design ensures that 
+users only need to call one function per chunk while the internal logic handles 
+the complexity of parameter-specific calibration requirements.
 
 # Saving the Back-calibrated Data
 
@@ -236,74 +252,140 @@ write_rds(calibrated_data, here::here("data", "raw", "sensor", "manual_data_veri
 
 # Explore the calibrations
 
-Find where calibrations could not be done and see what happened there.
+Find where we determined a calibration to be "bad"
 
 ```{r}
-fail_list <- sapply(calibrated_data$`2024`, function(df) {
-  if ("correct_calibration" %in% names(df)) {
-    any(df$correct_calibration == FALSE, na.rm = TRUE)
-  } else {
-    FALSE
-  }
-})
-
-check_list <- calibrated_data$`2024`[fail_list]
+check_list <- calibrated_data %>% 
+  map(function(year_list) {
+    year_list %>% 
+      map(function(site_param_df){
+        if (any(site_param_df$correct_calibration == FALSE, na.rm = TRUE)) {
+          return(site_param_df)
+        } else {
+          return(NULL)
+        }
+      }) %>% 
+      compact()
+  })
 ```
 
-```{r explore-cal}
-# update `calibrated_test` object with the data you would like to explore...
-calibrated_test <- check_list$`sfm-Specific Conductivity`
-# Extract parameter and site info for dynamic labeling
-parameter <- unique(calibrated_test$parameter)
-site <- unique(calibrated_test$site)
-# Create a combined dataset for plotting
-plot_data <- bind_rows(
-  # Original data
-  calibrated_test %>% 
-    select(DT_round, value = mean) %>%
-    mutate(correct_calibration = "Original"),
+```{r}
+# Function to make example plots
+
+ex_plot <- function(df) {
+  parameter <- unique(df$parameter)
+  site <- unique(df$site)
+  year <- lubridate::year(df$DT_round)[1]
   
-  # Calibrated sensor data with correct_calibration status
-  calibrated_test %>%
-    select(DT_round, value = mean_lm_trans, correct_calibration) %>%
-    mutate(correct_calibration = as.character(correct_calibration))
-)
-
-calibration_p_test <- ggplot(plot_data) +
-  geom_line(aes(x = DT_round, y = value, color = correct_calibration), 
-            alpha = 0.7, size = 0.5) +
-  scale_color_manual(values = c("TRUE" = "green", 
-                                "FALSE" = "red", 
-                                "Original" = "grey")) +
-  labs(
-    title = paste(site, parameter, "2024 Calibration"),
-    x = "Date",
-    y = paste(parameter, "(units)"),
-    color = "Correct Calibration"
-  ) +
-  # ylim(c(0,50)) +
-  theme_minimal()
-
-# Convert to plotly
-calibration_p_test <- ggplotly(calibration_p_test)
-calibration_p_test
+  # Create separate data frames
+  original_data <- df %>% 
+    select(DT_round, value = mean)
+  
+  calibrated_data_df <- df %>%
+    select(DT_round, value = mean_cal, correct_calibration)
+  
+  # Create plot with separate geom_line layers
+  p <- ggplot() +
+    geom_line(data = original_data, aes(x = DT_round, y = value), 
+              color = "grey", linewidth = 0.3) +
+    geom_line(data = calibrated_data_df, 
+              aes(x = DT_round, y = value, color = correct_calibration), 
+              linewidth = 0.5) +
+    scale_color_manual(values = c("TRUE" = "green", "FALSE" = "red"),
+                       name = "Calibrated Data") +
+    labs(
+      title = paste(site, parameter, year, "Calibration"),
+      x = "Date",
+      y = paste(parameter, "(units)")
+    ) +
+    theme_minimal()
+  
+  p <- ggplotly(p)
+  
+  return(p)
+}
 ```
 
-Some notes on this updated plot: 
+```{r}
+# Explore the data
+# Update `plot_df` and run this chunk to plot the data you want to see
+plot_df <- calibrated_data$`2024`$`joei-pH`
+ex_plot(plot_df)
+```
 
-Here I am highlighting when correct calibrations were used instead of bad calibrations.
-Chunks of code that were calibrated using a bad calibration are in red, while
-those that were calibrated with a good calibration are in green. The original
-data is displayed as a point of comparison between raw and back calibrated data.
+```{r}
+# Explore the calibrations that were used
+plot_df %>% 
+  filter(!is.na(units)) %>% 
+  group_by(slope, offset) %>% 
+  slice(1) %>% 
+  arrange(DT_round) %>% 
+  View(.)
+```
+
+# Some examples
+
+## Ideal situation
+
+```{r}
+plot_df <- check_list$`2024`$`sfm-Specific Conductivity`
+ex_plot(plot_df)
+```
+Here the grey line is the original data that we pulled from the sensor, green
+lines would be data that had a good calibration, and red lines are those data that
+had a bad calibration.
+
+Here we can see what this workflow is supposed to accomplish. The workflow was able 
+to automatically identify a bad calibration, is that information to convert it to a
+raw value, and then use the correct calibration information to convert those raw
+values into sensor readings that are in line with the patterns of the data.
+
+## Back-calibration error
+
+```{r}
+plot_df <- check_list$`2024`$`salyer-pH`
+ex_plot(plot_df)
+```
+
+Here we can see some errors that are possible with this workflow. Let's focus on
+these two errors one at a time.
+
+Lets start with the left most error, the portion of this graph where the green 
+line is back-calibrated in such a way that it is noticeably below the grey line.
+If we zoom into this plot we can see that the grey data already follows a good 
+pattern. However, the workflow interpolated between two "good" calibrations and
+skewed the data _away_ from the "correct" pattern. This is one of the weirder
+effects that could happen in this workflow, and one of the more "dangerous" ones
+as well. There is no indication that the workflow made a mistake, though it 
+definitely has, and what's more confusing is trying to figure out what that
+mistake is, exactly. If the mistake is that the latter calibration is wrong, and
+we are able to detect that in a patch, then we would expect the following chunk
+of data to be back calibrated using the current chunks calibration information. 
+The issue here is that both of these non-back-calibrated chunks look fine, so 
+the assumption is that they are both good calibrations. But those same "good"
+calibrations interpolated between each other can create errors in the data. 
+
+Now, let's look at the right most error, the portion of this graph where the red
+line is back-calibrated incorrectly. It appears to have found a bad calibration
+and tried to do what was done correctly in the SFM SPC example, but unfortunately,
+these raw values did not play well with the former good calibration coefficients.
+This is a real risk with sensor reading data that looks right, but was automatically
+detected as incorrect. Since the calibration coefficients for this "wrong" calibration
+are so different from the usual coefficients, when the reading data is converted
+from raw to "corrected" values this is the result that we would expect.
+
+I will note that pH is particularly difficult to back-calibrate for several reasons,
+but regardless this serves as a useful example for what could go wrong.
 
 # Workflow Summary
+
 The complete calibration workflow transforms raw sensor data through four main stages. 
 First, calibration information is loaded and joined with sensor data using temporal 
 matching. Second, the joined data is segmented into calibration windows for processing,
 where the data is converted to its raw values based on the calibration succession
 established in the original HTML extraction step. Third, each window undergoes 
 back calibration using parameter-specific algorithms  that account for instrument 
-characteristics and drift patterns. Finally, the calibrated  results are validated 
+characteristics. Finally, the calibrated  results are validated 
 and compiled into a clean time series dataset ready for analysis.
 
 

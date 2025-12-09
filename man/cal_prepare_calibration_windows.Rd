@@ -2,70 +2,70 @@
 % Please edit documentation in R/cal_prepare_calibration_windows.R
 \name{cal_prepare_calibration_windows}
 \alias{cal_prepare_calibration_windows}
-\title{Prepare sensor data for back calibration by inverting to raw values and creating calibration windows}
+\title{Create calibration windows between consecutive good calibrations}
 \usage{
 cal_prepare_calibration_windows(sensor_calibration_data_list)
 }
 \arguments{
-\item{sensor_calibration_data_list}{Nested list containing joined sensor and
-calibration data from join_sensor_calibration_data(), organized by year
-and site-parameter combinations. Must include calibration flags and
-lead calibration parameters for transformation.}
+\item{sensor_calibration_data_list}{Nested list from join_sensor_calibration_data()
+organized by year and site-parameter combinations. Must include sensor_serial,
+correct_calibration flags, and sensor_date_lead columns.}
 }
 \value{
 Nested list structure (year -> site-parameter -> calibration chunks)
-where each calibration chunk contains:
-\itemize{
-\item Raw sensor values (mean_raw) computed via inverse linear transformation
-\item Original calibrated values for comparison
-\item Calibration window boundaries defined by consecutive good calibrations
-\item All original sensor metadata and timestamps
-}
-
-Chunks with no valid next calibration have slope_lead, offset_lead, and
-mean_raw set to NA to prevent invalid transformations.
+where each chunk contains sensor data between two consecutive good calibrations
+from the same sensor. Chunks include slope_final and offset_final columns
+determined by calibration quality. Chunks missing sonde data are excluded.
 }
 \description{
-Transforms sensor data back to raw values and creates calibration windows for
-drift correction analysis. The function processes joined sensor-calibration data
-by first inverting calibrated measurements to their original raw form using the
-inverse linear model transformation, then segments the data into windows bounded
-by consecutive good calibrations.
+Segments joined sensor-calibration data into windows bounded by consecutive good
+calibrations. The function handles complex interactions between bad calibrations
+and sensor swaps by creating windows only when calibrations meet specific criteria
+for valid back calibration analysis.
 
-Raw data transformation is essential for drift detection because it reveals the
-actual sensor response patterns that occur between calibrations. The function
-handles missing or bad calibrations by skipping transformation when no valid
-next calibration exists, preventing invalid corrections downstream.
+Windows are created by splitting data based on changes in sensor serial numbers
+and then further segmenting by consecutive good calibrations. This approach ensures
+that each window contains sensor data collected between two reliable calibration
+points from the same sensor, enabling accurate drift detection and correction.
+
+The function handles edge cases where bad calibrations occur between good ones,
+sensor swaps interrupt calibration sequences, and missing calibration data.
+Only windows with valid calibration endpoints are retained for analysis.
 }
 \details{
-The function performs two key operations:
+The segmentation process occurs in two stages:
 \enumerate{
-\item \strong{Raw value recovery}: Uses cal_inv_lm() to transform calibrated sensor
-readings back to raw values using the inverse of the linear calibration model
-\item \strong{Window segmentation}: Creates data chunks between consecutive good
-calibrations using the sensor_date_lead_char column as grouping criteria
+\item Split by sensor serial number changes to handle sensor swaps
+\item Split by consecutive good calibrations within each sensor period
 }
 
-This preparation enables downstream drift detection algorithms to analyze the
-actual sensor response patterns that occur during deployment periods.
+Final slope and offset values are assigned based on calibration quality, using
+current calibration parameters for good calibrations and lagged parameters for
+bad calibrations. This enables appropriate parameter selection for subsequent
+drift correction analysis.
+
+Special considerations apply to pH parameters which require additional preparation
+to select appropriate calibration points before back calibration processing.
+
+Additional considerations for data preparation:
+
+Window creation must account for interactions between bad calibrations and sensor swaps.
+A longer calibration window is only valid when:
+\itemize{
+\item The former good calibration and bad calibration use the same sensor serial
+\item Both calibrations reference the same latter good calibration
+}
+
+pH parameters require special handling to select appropriate calibration points
+(point 1 vs point 2) before proceeding with back calibration analysis.
 }
 \examples{
 \dontrun{
-# Prepare calibration windows from joined data
 joined_data <- join_sensor_calibration_data(sensor_list, calibration_data)
 calibration_windows <- cal_prepare_calibration_windows(joined_data)
-
-# Check structure of prepared windows
-names(calibration_windows)  # Years
-names(calibration_windows$`2024`)  # Site-parameter combinations
-length(calibration_windows$`2024`$`site1-Temperature`)  # Number of chunks
 }
 
 }
 \seealso{
 \code{\link[=join_sensor_calibration_data]{join_sensor_calibration_data()}}
-
-\code{\link[=cal_inv_lm]{cal_inv_lm()}}
-
-\code{\link[=back_calibrate]{back_calibrate()}}
 }

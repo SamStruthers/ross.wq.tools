@@ -1,58 +1,60 @@
-#' @title Prepare sensor data for back calibration by inverting to raw values and creating calibration windows
+#' @title Create calibration windows between consecutive good calibrations
 #' @export
 #'
 #' @description
-#' Transforms sensor data back to raw values and creates calibration windows for
-#' drift correction analysis. The function processes joined sensor-calibration data
-#' by first inverting calibrated measurements to their original raw form using the
-#' inverse linear model transformation, then segments the data into windows bounded
-#' by consecutive good calibrations.
+#' Segments joined sensor-calibration data into windows bounded by consecutive good
+#' calibrations. The function handles complex interactions between bad calibrations
+#' and sensor swaps by creating windows only when calibrations meet specific criteria
+#' for valid back calibration analysis.
 #'
-#' Raw data transformation is essential for drift detection because it reveals the
-#' actual sensor response patterns that occur between calibrations. The function
-#' handles missing or bad calibrations by skipping transformation when no valid
-#' next calibration exists, preventing invalid corrections downstream.
+#' Windows are created by splitting data based on changes in sensor serial numbers
+#' and then further segmenting by consecutive good calibrations. This approach ensures
+#' that each window contains sensor data collected between two reliable calibration
+#' points from the same sensor, enabling accurate drift detection and correction.
 #'
-#' @param sensor_calibration_data_list Nested list containing joined sensor and
-#'   calibration data from join_sensor_calibration_data(), organized by year
-#'   and site-parameter combinations. Must include calibration flags and
-#'   lead calibration parameters for transformation.
+#' The function handles edge cases where bad calibrations occur between good ones,
+#' sensor swaps interrupt calibration sequences, and missing calibration data.
+#' Only windows with valid calibration endpoints are retained for analysis.
+#'
+#' @param sensor_calibration_data_list Nested list from join_sensor_calibration_data()
+#'   organized by year and site-parameter combinations. Must include sensor_serial,
+#'   correct_calibration flags, and sensor_date_lead columns.
 #'
 #' @return Nested list structure (year -> site-parameter -> calibration chunks)
-#' where each calibration chunk contains:
-#' - Raw sensor values (mean_raw) computed via inverse linear transformation
-#' - Original calibrated values for comparison
-#' - Calibration window boundaries defined by consecutive good calibrations
-#' - All original sensor metadata and timestamps
-#'
-#' Chunks with no valid next calibration have slope_lead, offset_lead, and
-#' mean_raw set to NA to prevent invalid transformations.
+#' where each chunk contains sensor data between two consecutive good calibrations
+#' from the same sensor. Chunks include slope_final and offset_final columns
+#' determined by calibration quality. Chunks missing sonde data are excluded.
 #'
 #' @details
-#' The function performs two key operations:
-#' 1. **Raw value recovery**: Uses cal_inv_lm() to transform calibrated sensor
-#'    readings back to raw values using the inverse of the linear calibration model
-#' 2. **Window segmentation**: Creates data chunks between consecutive good
-#'    calibrations using the sensor_date_lead_char column as grouping criteria
+#' The segmentation process occurs in two stages:
+#' 1. Split by sensor serial number changes to handle sensor swaps
+#' 2. Split by consecutive good calibrations within each sensor period
 #'
-#' This preparation enables downstream drift detection algorithms to analyze the
-#' actual sensor response patterns that occur during deployment periods.
+#' Final slope and offset values are assigned based on calibration quality, using
+#' current calibration parameters for good calibrations and lagged parameters for
+#' bad calibrations. This enables appropriate parameter selection for subsequent
+#' drift correction analysis.
+#'
+#' Special considerations apply to pH parameters which require additional preparation
+#' to select appropriate calibration points before back calibration processing.
+#'
+#' Additional considerations for data preparation:
+#'
+#' Window creation must account for interactions between bad calibrations and sensor swaps.
+#' A longer calibration window is only valid when:
+#' - The former good calibration and bad calibration use the same sensor serial
+#' - Both calibrations reference the same latter good calibration
+#'
+#' pH parameters require special handling to select appropriate calibration points
+#' (point 1 vs point 2) before proceeding with back calibration analysis.
 #'
 #' @examples
 #' \dontrun{
-#' # Prepare calibration windows from joined data
 #' joined_data <- join_sensor_calibration_data(sensor_list, calibration_data)
 #' calibration_windows <- cal_prepare_calibration_windows(joined_data)
-#'
-#' # Check structure of prepared windows
-#' names(calibration_windows)  # Years
-#' names(calibration_windows$`2024`)  # Site-parameter combinations
-#' length(calibration_windows$`2024`$`site1-Temperature`)  # Number of chunks
 #' }
 #'
 #' @seealso [join_sensor_calibration_data()]
-#' @seealso [cal_inv_lm()]
-#' @seealso [back_calibrate()]
 
 cal_prepare_calibration_windows <- function(sensor_calibration_data_list) {
   # Process each year of joined sensor-calibration data
@@ -61,56 +63,46 @@ cal_prepare_calibration_windows <- function(sensor_calibration_data_list) {
       # Process each site-parameter combination within the year
       prepped_yearly_site_param_chunks <- year %>%
         map(function(site_param_df){
-          # Split data by calibration dates to create original calibration periods
-          site_param_df <- site_param_df %>%
-            group_by(file_date) %>%
-            group_split() %>%
-            map_dfr(function(cal_chunk_og){
-              # Check if the chunk has something that it can turn back into
-              # If there is no next valid calibration to transform into,
-              # we want skip the raw transformation and prevent it from
-              # transforming down the line by setting slope and offset as NA
-              if (all(is.na(cal_chunk_og)) || all(cal_chunk_og$correct_calibration_lead == FALSE, na.rm = TRUE)) {
-                tweaked_chunk <- cal_chunk_og %>%
-                  mutate(
-                    slope_lead = NA,
-                    offset_lead = NA,
-                    mean_raw = NA
-                  )
-                return(tweaked_chunk)
-              }
-              # Transform the data into its raw form
-              tweaked_chunk <- cal_chunk_og %>%
-                cal_inv_lm(
-                  df = .,
-                  obs_col = "mean",
-                  slope_col = "slope",
-                  offset_col = "offset"
-                )
-              return(tweaked_chunk)
-            })
+
+          # Split data into calibration windows based on sensor changes and good calibrations
+          # This creates chunks of sensor data between consecutive reliable calibration points
           calibration_chunks <- site_param_df %>%
-            # Ensure sensor_date_lead is properly formatted as a string
-            # groupdata2:splt does not work with dates so we have to set
-            # the starting column as a character
-            mutate(
-              sensor_date_lead_chr = case_when(
-                is.na(sensor_date_lead) ~ NA_character_,
-                sensor_date_lead == "" ~ NA_character_,
-                TRUE ~ as.character(sensor_date_lead)
-              )
-            ) %>%
-            # We want to group by when correct calibration column changes
+            # Split by consecutive sensor serial numbers to handle sensor swaps
             groupdata2::splt(
               n = "auto",
               method = "l_starts",
-              # We know that sensor data lead is `tidyr::fill`'ed with good calibrations.
-              # Doing this allows us to make a group of a calibration chunk that is
-              # now defined as the chunk of data between two sequential GOOD calibrations.
-              starts_col = "sensor_date_lead_chr"
+              starts_col = "sensor_serial"
             ) %>%
-            # Remove chunks with missing sonde data
-            discard(~all(is.na(.x$sonde_serial)))
+            map(function(snsr_srl_list){
+              # Split by consecutive good calibrations within each sensor period
+              snsr_srl_list %>%
+                # Convert sensor_date_lead to character for grouping
+                mutate(
+                  sensor_date_lead_chr = case_when(
+                    is.na(sensor_date_lead) ~ NA_character_,
+                    sensor_date_lead == "" ~ NA_character_,
+                    TRUE ~ as.character(sensor_date_lead)
+                  )
+                ) %>%
+                groupdata2::splt(
+                  n = "auto",
+                  method = "l_starts",
+                  # Split when good calibrations change to create windows
+                  starts_col = "sensor_date_lead_chr"
+                ) %>%
+                # Remove chunks with missing sonde data
+                discard(~all(is.na(.x$sonde_serial)))
+            }) %>%
+            unlist(recursive = FALSE) %>%
+            map(function(cal_window) {
+              # Assign final calibration parameters based on calibration quality
+              cal_window %>%
+                mutate(
+                  slope_final = ifelse(correct_calibration, slope, slope_lag),
+                  offset_final = ifelse(correct_calibration, offset, offset_lag)
+                )
+            })
+
           return(calibration_chunks)
         })
     })
@@ -119,3 +111,5 @@ cal_prepare_calibration_windows <- function(sensor_calibration_data_list) {
   # enabling temporal interpolation of calibration parameters
   return(prepped_yearly_site_param_chunks)
 }
+
+

@@ -11,33 +11,20 @@
 #'
 #' @param field_cal_dir Character string specifying the directory path containing
 #'   field calibration HTML files (default: data/calibration_reports/)
-#' @param benchtop_cal_dir Character string specifying the directory path
-#'   containing benchtop calibration HTML files (default:
-#'   data/calibration_reports/benchtop_calibrations/)
 #'
 #' @seealso [load_calibration_data()]
 #' @seealso [join_sensor_calibration_data()]
 
-# TODO: Update this to accept xml2 generated HTML files for speed reasons
-cal_extract_markup_data <- function(field_cal_dir = here::here("data", "raw", "sensor", "calibration_reports"),
-                                    benchtop_cal_dir = here::here("data", "raw","sensor", "calibration_reports", "benchtop_calibrations")){
+cal_extract_markup_data <- function(field_cal_dir = here::here("data", "raw", "sensor", "calibration_reports")) {
 
-  # Input validation
+  # Input validation ----
   if (!is.character(field_cal_dir) || length(field_cal_dir) != 1) {
     stop("field_cal_dir must be a single character string")
   }
 
-  if (!is.character(benchtop_cal_dir) || length(benchtop_cal_dir) != 1) {
-    stop("benchtop_cal_dir must be a single character string")
-  }
-
-  # Directory validation
+  # Directory validation ----
   if (!dir.exists(field_cal_dir)) {
     stop("field_cal_dir does not exist: ", field_cal_dir)
-  }
-
-  if (!dir.exists(benchtop_cal_dir)) {
-    stop("benchtop_cal_dir does not exist: ", benchtop_cal_dir)
   }
 
   # Prepare field calibrations for extraction ====
@@ -52,6 +39,7 @@ cal_extract_markup_data <- function(field_cal_dir = here::here("data", "raw", "s
   # Extract site names and datetime information from field calibration file paths
   # No error handling internally in this map -- assuming that file paths always
   # have the right information in the right structure
+
   f_cal_info <- f_cal_paths %>%
     purrr::map(function(path_str){
       str_list <- basename(path_str) %>%
@@ -72,44 +60,14 @@ cal_extract_markup_data <- function(field_cal_dir = here::here("data", "raw", "s
       return(cal_info)
     })
 
-  # Prepare benchtop calibrations for extraction ====
-  # Identify and filter benchtop calibration HTML files
-  b_cal_paths <- list.files(benchtop_cal_dir, pattern = ".html", full.names = T)
-  b_cal_paths <- purrr::discard(b_cal_paths, ~grepl("vulink|virridy", .x, ignore.case = T))
-
-  # Extract datetime information from benchtop calibration file paths
-  # TODO: Update this to a more robust HTML parsing solution
-  b_cal_info <- b_cal_paths %>%
-    purrr::map(function(path_str){
-      str_list <- basename(path_str) %>%
-        stringr::str_split_1("_|\\.") %>%
-        stringr::str_squish() %>%
-        purrr::discard(~grepl("VuSitu|Calibration|html", .x, ignore.case = T))
-
-      # Handle different datetime formats in benchtop filenames
-      if (length(str_list) == 2){
-        date <- lubridate::with_tz(lubridate::ymd(str_list[2]), tzone = "UTC")
-      } else if (length(str_list) == 3){
-        unix_dt <- as.numeric(str_list[3])/1000
-        date <- lubridate::with_tz(lubridate::as_datetime(unix_dt, tz = "America/Denver", origin = origin), tzone = "UTC")
-      }
-
-      cal_info <- tibble::tibble(site = "benchtop", date = date)
-      return(cal_info)
-    })
-
   # Extract calibration information from all HTML files ====
-  # Combine field and benchtop calibration file paths and metadata
-  cal_paths <- c(f_cal_paths, b_cal_paths)
-  cal_info <- c(f_cal_info, b_cal_info)
 
   # Load HTML markup from all calibration files
-  # TODO: It is easier for the user if the function does all this with an HTML path, but this seems like too deep of an assumption
-  cal_html <- purrr::map(cal_paths, rvest::read_html)
+  cal_html <- purrr::map(f_cal_paths, rvest::read_html)
 
   # Extract calibration data from each HTML file
   cal_data <- purrr::map2_dfr(
-    cal_html, cal_info,
+    cal_html, f_cal_info,
     function(html_markup, calibration_information){
 
       # Extract overall calibration metadata from first table
@@ -122,11 +80,11 @@ cal_extract_markup_data <- function(field_cal_dir = here::here("data", "raw", "s
         dplyr::mutate(instrument = janitor::make_clean_names(instrument)) %>%
         dplyr::rename(sonde_serial = serial_number)
 
-      # Extract sensor-specific calibration data from each div element
+      # Extract each div element with sensor-specific calibration data
       html_divs <- html_markup %>%
         rvest::html_elements("div")
 
-      # Process each sensor div for calibration coefficients and drift data
+      # Process each sensor div for calibration coefficients
       html_div_info <- html_divs %>%
         purrr::map_dfr(function(div){
           # Identify sensor type from div metadata
@@ -185,28 +143,15 @@ cal_extract_markup_data <- function(field_cal_dir = here::here("data", "raw", "s
     })
 
   # Organize extracted calibration information ====
-  # Separate field and benchtop calibration data for merging
-  f_cal_data <- dplyr::filter(cal_data, site != "benchtop")
-  b_cal_data <- dplyr::filter(cal_data, site == "benchtop") %>%
-    dplyr::select(sensor, sensor_serial, sensor_date, calibration_coefs, driftr_input)
-
   # Merge field and benchtop calibrations, prioritizing field calibrations
-  calibrations <- dplyr::left_join(f_cal_data, b_cal_data,
-                                   by = c("sensor", "sensor_serial", "sensor_date"),
-                                   suffix = c(".field", ".benchtop"),
-                                   relationship = "many-to-many") %>%
-    # Coalesce calibration data, preferring field calibrations over benchtop
-    dplyr::mutate(
-      calibration_coefs = purrr::map2(calibration_coefs.field, calibration_coefs.benchtop,
-                                      ~ if(!is.null(.x)) .x else .y),
-      drift_input = purrr::map2(driftr_input.field, driftr_input.benchtop,
-                                ~ if(!is.null(.x)) .x else .y),
-      calibration_coefs = purrr::map(calibration_coefs, ~ if(is.null(.x)) NA else .x),
-      drift_input = purrr::map(drift_input, ~ if(is.null(.x)) NA else .x)
+  calibration_list <- cal_data %>%
+    # Filter out bad calibration data
+    dplyr::filter(
+      sensor_date != "Factory Defaults",
+      (!is.na(slope) & !is.na(offset)),
+      !is.infinite(slope),
+      !is.infinite(offset)
     ) %>%
-    # Clean up merged columns and filter valid calibrations
-    dplyr::select(-dplyr::ends_with(".field"), -dplyr::ends_with(".benchtop")) %>%
-    dplyr::filter(!is.na(calibration_coefs) | !is.na(drift_input)) %>%
     # Organize columns by data type
     dplyr::select(
       # Site and sensor identification
@@ -216,22 +161,15 @@ cal_extract_markup_data <- function(field_cal_dir = here::here("data", "raw", "s
       # Instrument identification
       sonde_serial, sensor_serial,
       # Calibration data
-      calibration_coefs
-    )
-
-
-  calibration_list <- calibrations %>%
+      slope, offset, units, slope_units, offset_units, point
+    ) %>%
     # Parse datetime columns
     dplyr::mutate(
       sonde_date = lubridate::mdy(sonde_date),
-      sensor_date = lubridate::mdy(dplyr::na_if(sensor_date, "Factory Defaults"))
+      sensor_date = lubridate::mdy(sensor_date)
     ) %>%
-    # Before we split this data up, we need to figure out each parameters statistic
-    # UPDATE `annotate_calibration_data` function WITH THE STATISTIC THAT WE WANT
-    # TO USE TO MAKE THE THRESHOLD
-    # For now we are just going to use all the sensor calibration coefficients as the
-    # statistic that we are going to use
-    ross.wq.tools::annotate_calibration_data() %>%
+    # Before splitting up the data, we need to determine which calibrations are good and bad
+    ross.wq.tools::cal_annotate() %>%
     # Structure calibration data by year and site-parameter combinations
     # Split by year
     split(f = lubridate::year(.$file_date)) %>%
@@ -240,60 +178,31 @@ cal_extract_markup_data <- function(field_cal_dir = here::here("data", "raw", "s
       site_param_split_list <- year_data %>%
         split(f = list(.$site, .$sensor), sep = "-", drop = TRUE) %>%
         purrr::discard(\(site_param_df) nrow(site_param_df) == 0) %>%
-        purrr::map_dfr(function(site_param_df){
-          site_param_df %>%
-            # Deduplicate calibrations by selecting most recent per day
-            dplyr::group_by(sensor, sonde_date, sensor_serial) %>%
-            dplyr::slice_max(file_date, n = 1, with_ties = F) %>%
-            dplyr::ungroup() %>%
-            # Select most recent calibration per sensor
-            dplyr::group_by(sensor, sensor_date, sensor_serial) %>%
-            dplyr::slice_min(file_date, n = 1, with_ties = F) %>%
-            dplyr::ungroup() %>%
-            # Remove any remaining duplicates
-            dplyr::distinct()
-        }) %>%
-        # Add calibration provenance
+        # De-duplicate the data
+        purrr::map_dfr(cal_deduplicate) %>%
         split(f = list(.$sensor, .$sensor_serial), sep = "-") %>%
         discard(~is.null(.) || nrow(.) == 0) %>%
         map_dfr(function(sensor_serial_df) {
 
-          # Split the data between good and bad calibrations and then join them again
+          # Find succession for pH
+          if(all(!is.na(sensor_serial_df$point))) {
 
-          # Check if we have any good calibrations
-          good_calibrations <- sensor_serial_df %>%
-            dplyr::filter(correct_calibration)
+            point1_df <- sensor_serial_df %>% dplyr::filter(point == 1)
+            point2_df <- sensor_serial_df %>% dplyr::filter(point == 2)
 
-          if (nrow(good_calibrations) > 0) {
-            good_calibrations <- good_calibrations %>%
-              dplyr::arrange(sensor_date) %>%
-              dplyr::mutate(
-                sensor_date_lead = dplyr::lead(sensor_date, 1),
-                slope_lead = dplyr::lead(slope, 1),
-                offset_lead = dplyr::lead(offset, 1),
-                correct_calibration_lead = dplyr::lead(correct_calibration, 1)
-              )
+            point1_processed <- ross.wq.tools::cal_succession(point1_df)
+
+            point2_processed <- ross.wq.tools::cal_succession(point2_df)
+
+            joined_dfs <- bind_rows(point1_processed, point2_processed) %>%
+              dplyr::arrange(sensor_date, point)
+
+            return(joined_dfs)
+
           } else {
-            # If no good calibrations, return the df as is
-            return(sensor_serial_df)
+            # not ph - process normally
+            return(ross.wq.tools::cal_succession(sensor_serial_df))
           }
-
-          # Check if we have any bad calibrations
-          bad_calibrations <- sensor_serial_df %>%
-            dplyr::filter(!correct_calibration)
-
-
-          # Combine them
-          calibrations <- dplyr::bind_rows(good_calibrations, bad_calibrations) %>%
-            dplyr::arrange(sensor_date) %>%
-            # forward fill the next good calibration
-            tidyr::fill(
-              sensor_date_lead, slope_lead, offset_lead, correct_calibration_lead,
-              .direction = "down"
-            )
-
-          return(calibrations)
-
         }) %>%
         # Transform back to site-parameter
         split(f = list(.$site, .$sensor), sep = "-", drop = TRUE) %>%

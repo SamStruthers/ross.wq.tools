@@ -43,7 +43,8 @@ Imports:
     readxl,
     tibble,
     tidyr,
-    xml2
+    xml2,
+    groupdata2
 Suggests: 
     knitr,
     rmarkdown

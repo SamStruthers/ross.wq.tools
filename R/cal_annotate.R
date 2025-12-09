@@ -44,15 +44,15 @@
 #' table(annotated_data$correct_calibration)
 #' }
 
-annotate_calibration_data <- function(raw_calibration_df) {
+cal_annotate <- function(raw_calibration_df) {
   # NOTE: Some parameters may have NA offset values that should be treated as 0.
   # This handling may occur in upstream extraction functions but needs verification.
 
   # Split data by sensor type and apply outlier detection
   annotated_calibration_data <- raw_calibration_df %>%
     split(f = .$sensor) %>%
-    map(unnest, cols = calibration_coefs) %>%
     map_dfr(function(sensor_df){
+
       clean_df <- sensor_df %>%
         mutate(
           offset = as.numeric(offset),
@@ -98,7 +98,11 @@ annotate_calibration_data <- function(raw_calibration_df) {
             # No valid data available
             TRUE ~ FALSE
           )
-        )
+        ) %>%
+        # This will be applied to everything, but really it is just for pH
+        group_by(file_date) %>%
+        mutate(correct_calibration = ifelse(any(!correct_calibration), FALSE, TRUE)) %>%
+        ungroup()
       return(annotated_df)
     })
   return(annotated_calibration_data)

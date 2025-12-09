@@ -57,17 +57,6 @@ cal_inv_lm <- function(df, obs_col, slope_col, offset_col){
   # Create output column name for raw values
   raw_col <- paste0(obs_col, "_raw")
 
-  # Extract calibration coefficients from first calibration
-  slope <- as.numeric(df[[slope_col]][1])
-  offset <- as.numeric(df[[offset_col]][1])
-
-  # Handle missing calibration data
-  if (is.na(slope) || is.na(offset)) {
-    df <- df %>%
-      mutate(!!raw_col := NA_integer_)
-    return(df)
-  }
-
   # Apply inverse linear model transformation: x = (y - b) / m
   df <- df %>%
     mutate(!!raw_col := (.data[[obs_col]] - offset) / slope)

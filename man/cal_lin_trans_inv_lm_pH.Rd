@@ -6,9 +6,10 @@
 \usage{
 cal_lin_trans_inv_lm_pH(
   df = .,
-  obs_col = "mean",
-  mv_col = "mean_mV_f",
-  lm_coefs_col = "calibration_coefs",
+  obs_col,
+  mv_col = "mean_raw",
+  slope_col,
+  offset_col,
   wt_col = "wt"
 )
 }
@@ -21,11 +22,11 @@ original pH observations for range selection logic (default: "mean")}
 \item{mv_col}{Character string specifying the column name containing
 millivolt values from pH linear model transformation (default: "mean_mV_f")}
 
-\item{lm_coefs_col}{Character string specifying the column name containing
-linear model coefficients (default: "calibration_coefs")}
-
 \item{wt_col}{Character string specifying the column name containing temporal
 weight parameters (default: "wt")}
+
+\item{lm_coefs_col}{Character string specifying the column name containing
+linear model coefficients (default: "calibration_coefs")}
 }
 \description{
 Converts millivolt values back to pH units using temporally-weighted inverse

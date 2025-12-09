@@ -42,31 +42,12 @@ cal_lin_trans_lm <- function(df, raw_col, slope_col, offset_col, wt_col){
   # Create output column name for linearly transformed values
   transformed_col <- paste0(str_split_1(raw_col, "_")[1], "_lm_trans")
 
-  # Extract calibration coefficients from bounding calibrations
-
-  # Calibration 1
-  slope_1 <- df[[slope_col]][1]
-  offset_1 <- df[[offset_col]][1]
-
-  # Calibration 2
-  # Hard coded for now
-  slope_2 <- df[["slope_lead"]][1]
-  offset_2 <- df[["offset_lead"]][1]
-
-  # Handle missing calibration data
-  if (any(is.na(c(slope_1, offset_1, slope_2, offset_2)))) {
-    df <- df %>%
-      mutate(!!raw_col := NA_integer_)
-    return(df)
-  }
-
-  # Calculate parameter differences for temporal interpolation
-  slope_delta <- slope_1 - slope_2
-  offset_delta <- offset_1 - offset_2
-
   # Apply temporally-weighted linear model: y = (m_1-wt(m_1-m_2))x+(b_1-wt(b_1-b_2))
   df <- df %>%
-    mutate(!!transformed_col := ((slope_1-(.data[[wt_col]]*slope_delta))*.data[[raw_col]])+(offset_1-(.data[[wt_col]]*offset_delta)))
+    mutate(
+      slope_delta = !!sym(slope_col) - slope_lead,
+      offset_delta = !!sym(offset_col) - offset_lead,
+      !!transformed_col := ((!!sym(slope_col)-(.data[[wt_col]]*slope_delta))*.data[[raw_col]])+(!!sym(offset_col)-(.data[[wt_col]]*offset_delta)))
 
   return(df)
 }

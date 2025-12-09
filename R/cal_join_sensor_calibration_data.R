@@ -41,7 +41,7 @@ cal_join_sensor_calibration_data <- function(sensor_data_list, calibration_data_
 
           # Extract data for current site-parameter combination
           sensor_data <- year_sensor_data[[site_param]]
-          calibration_data <- select(year_calibration_data[[site_param]], -sensor)
+          calibration_data <- select(year_calibration_data[[site_param]], -sensor, units_cal = units)
 
           # Join calibration data to sensor data using temporal proximity matching.
           # For each sensor timestamp, find the most recent calibration that
