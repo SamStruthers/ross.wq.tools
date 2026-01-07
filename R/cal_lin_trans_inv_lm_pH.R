@@ -1,4 +1,5 @@
 #' @title Linear Transition Between Inverse Linear Models (pH Specific)
+#' @export
 #'
 #' @description
 #' Converts millivolt values back to pH units using temporally-weighted inverse
