@@ -19,7 +19,6 @@
 /*.Rcheck/
 
 # RStudio files
-ross.wq.tools.Rproj
 .Rproj.user/
 
 # produced vignettes
