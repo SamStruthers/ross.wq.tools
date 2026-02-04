@@ -1,0 +1,490 @@
+---
+title: "fixing_drift"
+output: html_document
+---
+
+This vignette demonstrates the complete workflow for correcting drift on optical
+water quality sensor data using linear and exponential models. The process
+corrects sensor drift caused by bio-fouling.
+
+This vignette will also demonstrate when this method works effectively and 
+when it does not.
+
+# Overview 
+
+# Prepare Environment
+```{r}
+knitr::opts_chunk$set(
+  eval = FALSE,
+  echo = TRUE
+)
+```
+
+```{r}
+#Installing and loading all packages
+invisible(
+  lapply(c(
+    "tidyverse", # Data manipulation
+    "janitor", # Clean dirty data
+    "lubridate", # Date-Time Manipulation
+    "rvest", # HTML Retrieval and Manipulation
+    "readxl", # Reading excel files
+    "here", # Easy, cross platform file referencing
+    "ggplot2", # Plotting libraries
+    "patchwork",
+    "ggpubr",
+    "plotly",
+    "devtools", # For downloading GitHub packages
+    "remotes",
+    "yaml",
+    "arrow", # reading parquet files
+    "groupdata2"
+  ),
+  function(x) {
+    if (x %in% installed.packages()) {
+      suppressMessages({
+        library(x, character.only = TRUE)
+      })
+    } else {
+      suppressMessages({
+        install.packages(x)
+        library(x, character.only = TRUE)
+      })
+    }
+  })
+)
+
+load_all()
+```
+
+The environment setup loads essential packages for data manipulation and 
+sources all calibration functions needed for the workflow.
+
+# Load Manually Verified Data
+
+This pulls the sensor time series data that has been manually calibrated. 
+
+```{r}
+# TODO: Still need to find a drift detection method that we can trust running programatically
+
+# Just doing turbidity for now...
+optical_sensors <- c("Turbidity")
+
+sensor_f <- list.files(here::here("data", "raw", "sensor", "manual_data_verification",
+                                  "2025_cycle", "in_progress", "verified_directory"),
+                       pattern = "Turbidity", 
+                       ignore.case = TRUE,
+                       full.names = TRUE)
+
+data <- map(sensor_f, arrow::read_parquet) %>%
+  set_names(stringr::str_extract(basename(sensor_f), "^[^_]+"))
+
+rm(optical_sensors, sensor_f)
+gc()
+```
+
+# Prep the Data
+
+We will make a `drift` column for simplicity. We will also need the field note
+information.
+
+```{r}
+field_notes <- grab_mWater_sensor_notes(load_mWater())
+
+data <- data %>%
+  map(function(df) {
+    df <- df %>% 
+      add_field_notes(field_notes) %>%
+      mutate( 
+        drift = ifelse(
+          stringr::str_detect(flag, "drift") | stringr::str_detect(user_flag, "drift"),
+          TRUE,
+          FALSE
+        ),
+        drift = ifelse(is.na(drift), FALSE, drift))
+  })
+```
+
+# Plotting function and plot some data
+```{r}
+plot_drift <- function(df) {
+  library(plotly)
+  
+  # Create color mapping
+  colors <- ifelse(df$drift == TRUE, "tomato", "steelblue")
+  
+  plot_ly(df, 
+          x = ~DT_round, 
+          y = ~mean,
+          color = ~drift,
+          colors = c("FALSE" = "steelblue", "TRUE" = "tomato"),
+          type = "scatter",
+          mode = "markers") %>%
+    layout(xaxis = list(title = "DT_round"),
+           yaxis = list(title = "mean"))
+}
+```
+
+```{r}
+plot_drift(data$`riverbluffs-Turbidity`)
+```
+
+# Find a workable drift correction example
+
+In order to be able to do this correction programmatically, it is necessary
+for drift groups to be accurately and completely identified. This means that an
+instance of biofouling drift should have accurate start and end times and should
+have no points of data in between its beginning and end that are not tagged with
+the `drift` flag.
+
+Here I will provide an example of an appropriately flagged drift instance and an
+inappropriately flagged drift instance. 
+
+```{r}
+# Examples are pulled from turbidity data at riverbluffs
+
+good_drift_flag <- data$`riverbluffs-Turbidity` %>% 
+  filter(between(DT_round, as.POSIXct("2025-04-02"), as.POSIXct("2025-04-10")))
+
+bad_drift_flag <- data$`riverbluffs-Turbidity` %>% 
+  filter(between(DT_round, as.POSIXct("2025-09-01"), as.POSIXct("2025-09-10")))
+
+```
+
+## Good drift event
+
+```{r}
+plot_drift(good_drift_flag)
+```
+
+Assuming that this is not an actual event in the river, this is a good example
+of drift because there are no instances of points within the drift event that 
+do not have the `drift` flag. There is the issue of the last point, which
+if included in the correction would greatly affect the results. For now, lets 
+mark that point as `FALSE` in the drift column that we made...
+
+```{r}
+good_drift_flag <- good_drift_flag %>% 
+  mutate(drift = ifelse(DT_round == "2025-04-07 18:00:00", FALSE, drift))
+```
+
+## Bad drift event
+
+```{r}
+plot_drift(bad_drift_flag)
+```
+
+This is an instance of bad drift for a lot of reasons. First, the start and end
+times of the drift event are not accurate (it doesn't look like a biofouling 
+drift event to begin with). Second, there are many points in between this event 
+that are not tagged with the `drift` flag. 
+
+# Solution exploration
+
+Now that we have an example of good drift and bad drift, lets do a first pass
+at what a drift correction workflow would look like
+
+## Step 1: Split data up into "drift events"
+
+For the sake of exploration I am going to bind these two examples together so that
+we can get a sense of what the actual workflow would look like.
+
+To do this we are going to use a method that is very similar to that in 
+`cal_prepare_calibration_windows`
+
+```{r}
+plot_drift(drift_examples)
+```
+
+```{r}
+# bind the examples
+drift_examples <- bind_rows(good_drift_flag, bad_drift_flag)
+
+# Split the examples based on the drift column
+drift_chunks <- drift_examples %>% 
+  mutate(drift = as.character(drift)) %>%  # Convert to character instead of factor
+  groupdata2::splt(
+    n = "auto",
+    method = "l_starts",
+    starts_col = "drift"
+  )
+
+# Make a subset of the data that needs to be corrected (drift = "TRUE" AND has data)
+drift_correction_chunks <- drift_chunks %>% 
+  keep(~ any(.x$drift == "TRUE") & !all(is.na(.x$mean)))
+
+# Make a subset of the data that does not need to be corrected
+no_correction_chunks <- drift_chunks %>% 
+  keep(~ any(.x$drift == "FALSE") | all(is.na(.x$mean)))
+```
+
+Now we can see some examples of drift chunks and non-drift chunks
+
+```{r}
+plot_drift(drift_correction_chunks$`2`)
+```
+
+```{r}
+plot_drift(drift_correction_chunks$`6`)
+```
+
+```{r}
+plot_drift(no_correction_chunks$`1`)
+```
+
+## Step 2: apply the drift correction function to these data
+
+This workflow could apply the `cal_exp_one_point_drift()` either exponentially
+or linearly and either multiplicatively or additively based on some thresholds
+that we prescribe. It should also fit the parameters for those calculations
+before making the corrections. For now, to make a working example, I am running
+the data through the correction without any parameter fitting. In order to explore 
+what the different solutions look like I am going to run all the permutations of
+drift type and correction type. Those being:
+
+- drift type:
+- linear
+- exponential
+
+- correction type:
+- additive
+- multiplicative
+
+|               | additive                  | multiplicative                  |
+|---------------|---------------------------|---------------------------------|
+| **linear**    | linear + additive         | linear + multiplicative         |
+| **exponential** | exponential + additive  | exponential + multiplicative    |
+
+I will note that updates to the documentation and intention of the 
+`cal_exp_one_point_drift` function are needed for these new use cases.
+
+Ideally we would like to use the pre and post cal/clean columns that are in the data,
+but we cannot reliably use those right now. Here is a manual way to prepare the pre and post
+values that we should be using for the drift correction. We will use the values that
+are available for the bad drift event example
+
+```{r}
+good_pre_drift_col <- mean(tail(drift_correction_chunks$`2`$mean, 4))
+
+# Filtering out NA data to get to the numeric data for the average result
+good_drift_post_val_df <- no_correction_chunks$`5` %>%
+  filter(!is.na(mean))
+
+good_post_drift_col <- mean(head(good_drift_post_val_df$mean, 4))
+
+good_example <- drift_correction_chunks$`2` %>%
+  mutate(
+    turb_pre_clean = good_pre_drift_col,
+    turb_post_cal = good_post_drift_col
+  ) %>%
+  # Add the weight column
+  cal_wt(df = .,
+         dt_col = "DT_round",
+         wt_col = "wt")
+
+bad_example <- drift_correction_chunks$`6` %>%
+  # Add the weight column
+  cal_wt(df = .,
+         dt_col = "DT_round",
+         wt_col = "wt")
+```
+
+Now that we have some example data prepared, lets apply all of the drift
+correction permutations to each of these data examples.
+
+```{r}
+# Good example permutations ====
+# good linear additive
+good_lin_add <- cal_exp_one_point_drift(
+  df = good_example,
+  lm_trans_col = "mean",
+  pre_col = "turb_pre_clean",
+  post_col = "turb_post_cal",
+  wt_col = "wt",
+  drift_type = "linear",
+  correction_type = "additive"
+)
+# good linear multiplicative
+good_lin_mult <- cal_exp_one_point_drift(
+  df = good_example,
+  lm_trans_col = "mean",
+  pre_col = "turb_pre_clean",
+  post_col = "turb_post_cal",
+  wt_col = "wt",
+  drift_type = "linear",
+  correction_type = "multiplicative"
+)
+# good exponential additive
+good_exp_add <- cal_exp_one_point_drift(
+  df = good_example,
+  lm_trans_col = "mean",
+  pre_col = "turb_pre_clean",
+  post_col = "turb_post_cal",
+  wt_col = "wt",
+  drift_type = "exponential",
+  correction_type = "additive"
+)
+# good exponential multiplicative
+good_exp_mult <- cal_exp_one_point_drift(
+  df = good_example,
+  lm_trans_col = "mean",
+  pre_col = "turb_pre_clean",
+  post_col = "turb_post_cal",
+  wt_col = "wt",
+  drift_type = "exponential",
+  correction_type = "multiplicative"
+)
+
+# Bad example permutations
+# bad linear additive
+bad_lin_add <- cal_exp_one_point_drift(
+  df = bad_example,
+  lm_trans_col = "mean",
+  pre_col = "turb_pre_clean",
+  post_col = "turb_post_clean",
+  wt_col = "wt",
+  drift_type = "linear",
+  correction_type = "additive"
+)
+# good linear multiplicative
+bad_lin_mult <- cal_exp_one_point_drift(
+  df = bad_example,
+  lm_trans_col = "mean",
+  pre_col = "turb_pre_clean",
+  post_col = "turb_post_clean",
+  wt_col = "wt",
+  drift_type = "linear",
+  correction_type = "multiplicative"
+)
+# good exponential additive
+bad_exp_add <- cal_exp_one_point_drift(
+  df = bad_example,
+  lm_trans_col = "mean",
+  pre_col = "turb_pre_clean",
+  post_col = "turb_post_clean",
+  wt_col = "wt",
+  drift_type = "exponential",
+  correction_type = "additive"
+)
+# good exponential multiplicative
+bad_exp_mult <- cal_exp_one_point_drift(
+  df = bad_example,
+  lm_trans_col = "mean",
+  pre_col = "turb_pre_clean",
+  post_col = "turb_post_clean",
+  wt_col = "wt",
+  drift_type = "exponential",
+  correction_type = "multiplicative"
+)
+```
+
+```{r}
+# Plots to compare the results
+# Good example plots ====
+p_good_lin_add <- ggplot(good_lin_add, aes(x = DT_round)) +
+  geom_line(aes(y = mean, color = "Uncorrected"), linewidth = 1) +
+  geom_line(aes(y = mean_drift_trans, color = "Corrected"), linewidth = 1) +
+  scale_color_manual(values = c("Uncorrected" = "red", "Corrected" = "green")) +
+  labs(title = "Linear + Additive", y = "Turbidity (NTU)", x = "Date", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+p_good_lin_mult <- ggplot(good_lin_mult, aes(x = DT_round)) +
+  geom_line(aes(y = mean, color = "Uncorrected"), linewidth = 1) +
+  geom_line(aes(y = mean_drift_trans, color = "Corrected"), linewidth = 1) +
+  scale_color_manual(values = c("Uncorrected" = "red", "Corrected" = "green")) +
+  labs(title = "Linear + Multiplicative", y = "Turbidity (NTU)", x = "Date", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+p_good_exp_add <- ggplot(good_exp_add, aes(x = DT_round)) +
+  geom_line(aes(y = mean, color = "Uncorrected"), linewidth = 1) +
+  geom_line(aes(y = mean_drift_trans, color = "Corrected"), linewidth = 1) +
+  scale_color_manual(values = c("Uncorrected" = "red", "Corrected" = "green")) +
+  labs(title = "Exponential + Additive", y = "Turbidity (NTU)", x = "Date", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+p_good_exp_mult <- ggplot(good_exp_mult, aes(x = DT_round)) +
+  geom_line(aes(y = mean, color = "Uncorrected"), linewidth = 1) +
+  geom_line(aes(y = mean_drift_trans, color = "Corrected"), linewidth = 1) +
+  scale_color_manual(values = c("Uncorrected" = "red", "Corrected" = "green")) +
+  labs(title = "Exponential + Multiplicative", y = "Turbidity (NTU)", x = "Date", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Bad example plots ====
+p_bad_lin_add <- ggplot(bad_lin_add, aes(x = DT_round)) +
+  geom_line(aes(y = mean, color = "Uncorrected"), linewidth = 1) +
+  geom_line(aes(y = mean_drift_trans, color = "Corrected"), linewidth = 1) +
+  scale_color_manual(values = c("Uncorrected" = "red", "Corrected" = "green")) +
+  labs(title = "Linear + Additive", y = "Turbidity (NTU)", x = "Date", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+p_bad_lin_mult <- ggplot(bad_lin_mult, aes(x = DT_round)) +
+  geom_line(aes(y = mean, color = "Uncorrected"), linewidth = 1) +
+  geom_line(aes(y = mean_drift_trans, color = "Corrected"), linewidth = 1) +
+  scale_color_manual(values = c("Uncorrected" = "red", "Corrected" = "green")) +
+  labs(title = "Linear + Multiplicative", y = "Turbidity (NTU)", x = "Date", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+p_bad_exp_add <- ggplot(bad_exp_add, aes(x = DT_round)) +
+  geom_line(aes(y = mean, color = "Uncorrected"), linewidth = 1) +
+  geom_line(aes(y = mean_drift_trans, color = "Corrected"), linewidth = 1) +
+  scale_color_manual(values = c("Uncorrected" = "red", "Corrected" = "green")) +
+  labs(title = "Exponential + Additive", y = "Turbidity (NTU)", x = "Date", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+p_bad_exp_mult <- ggplot(bad_exp_mult, aes(x = DT_round)) +
+  geom_line(aes(y = mean, color = "Uncorrected"), linewidth = 1) +
+  geom_line(aes(y = mean_drift_trans, color = "Corrected"), linewidth = 1) +
+  scale_color_manual(values = c("Uncorrected" = "red", "Corrected" = "green")) +
+  labs(title = "Exponential + Multiplicative", y = "Turbidity (NTU)", x = "Date", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Combine plots with patchwork to match table layout
+# Table order: linear + additive | linear + multiplicative
+#              exponential + additive | exponential + multiplicative
+
+good_plot <- (p_good_lin_add | p_good_lin_mult) / 
+  (p_good_exp_add | p_good_exp_mult) +
+  plot_annotation(title = "Good Drift Example: Correction Method Comparison",
+                  theme = theme(plot.title = element_text(size = 16, face = "bold")))
+
+bad_plot <- (p_bad_lin_add | p_bad_lin_mult) / 
+  (p_bad_exp_add | p_bad_exp_mult) +
+  plot_annotation(title = "Bad Drift Example: Correction Method Comparison",
+                  theme = theme(plot.title = element_text(size = 16, face = "bold")))
+
+# Display the plots
+good_plot
+bad_plot
+```
+
+
+# Thoughts
+
+We can see why the good drift event is good, and why the bad drift event is bad.
+The results are pretty similar, but the process to get to these results is 
+seriously hampered by either the autoqaqc flags, the field notes, and looking 
+forward to find the "correct" time to compare the drift data to (if there
+is no pre/post cal column information). There are quite a few issues to solve
+this problem programmatically. 
+
+Here we can see that for this linear looking
+drift period that the linear multiplicative correction worked better than 
+the other solutions. The big issue with the additive approach is that it results
+in values less than 0. I am not 100% certain that these are the final equations
+for this problem, but it is a start. They should also be calibrated on a case
+by case basis, which adds another layer of complexity to this. 
+
+Note that right now we are defining
+drift events as those data that are tagged with the `drift` flag, and not as
+the entire period between site visits. I am doing this because I think it should
+be easier to fit an exponential model to the drift events alone as opposed to the
+entire inter-site visit period. This is based on a hunch more than extensive 
+explorations of comparisons between those two definitions of drift correction chunks
