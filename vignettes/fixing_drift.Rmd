@@ -262,7 +262,7 @@ values that we should be using for the drift correction. We will use the values 
 are available for the bad drift event example
 
 ```{r}
-good_pre_drift_col <- mean(tail(drift_correction_chunks$`2`$mean, 4))
+good_pre_drift_col <- mean(tail(drift_correction_chunks$`2`$mean_analysis, 4))
 
 # Filtering out NA data to get to the numeric data for the average result
 good_drift_post_val_df <- no_correction_chunks$`5` %>%
