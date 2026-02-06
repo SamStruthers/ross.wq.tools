@@ -268,7 +268,7 @@ good_pre_drift_col <- mean(tail(drift_correction_chunks$`2`$mean_analysis, 4))
 good_drift_post_val_df <- no_correction_chunks$`5` %>%
   filter(!is.na(mean_analysis))
 
-good_post_drift_col <- mean(head(good_drift_post_val_df$mean, 4))
+good_post_drift_col <- mean(head(good_drift_post_val_df$mean_analysis, 4))
 
 good_example <- drift_correction_chunks$`2` %>%
   mutate(
