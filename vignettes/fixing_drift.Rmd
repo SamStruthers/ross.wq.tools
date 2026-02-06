@@ -213,7 +213,7 @@ drift_correction_chunks <- drift_chunks %>%
 
 # Make a subset of the data that does not need to be corrected
 no_correction_chunks <- drift_chunks %>% 
-  keep(~ any(.x$drift == "FALSE") | all(is.na(.x$mean)))
+  keep(~ any(.x$drift == "FALSE") | all(is.na(.x$mean_analysis)))
 ```
 
 Now we can see some examples of drift chunks and non-drift chunks
