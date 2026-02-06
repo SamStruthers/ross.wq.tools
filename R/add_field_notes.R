@@ -59,12 +59,17 @@ add_field_notes <- function(df, notes) {
       # Remove any duplicate records that might have been introduced
       dplyr::distinct() %>%
 
+      # Remove sonde_employed and other field note columns if they exist
+      dplyr::select(-any_of(c("sonde_employed", "sonde_moved", "last_site_visit",
+                              "visit_comments", "sensor_malfunction", "cals_performed"))) %>%
+
       # Join the time series data with relevant field note information
       # This adds human observations to the sensor readings
       dplyr::full_join(., dplyr::select(site_field_notes,
                                         sonde_employed, sonde_moved,
                                         last_site_visit, DT_join, visit_comments,
-                                        sensor_malfunction, cals_performed),
+                                        sensor_malfunction, cals_performed,
+                                        matches("pre|post")),
                        by = c('DT_join')) %>%
 
       # Ensure proper temporal ordering of the combined data
@@ -77,7 +82,8 @@ add_field_notes <- function(df, notes) {
       # and forward-fill deployment status and site visit information
       # This maintains status continuity between discrete field observations
       dplyr::mutate(sonde_employed = ifelse(is.na(sonde_employed), 0, sonde_employed)) %>%
-      tidyr::fill(c(sonde_employed, last_site_visit, sensor_malfunction)) %>%
+      tidyr::fill(c(sonde_employed, last_site_visit, sensor_malfunction,
+                    turb_pre_clean, turb_post_clean)) %>%
 
       # Handle special case: If no site visit information exists at the beginning
       # of the record, assume sonde was not yet deployed (sonde_employed = 1)
