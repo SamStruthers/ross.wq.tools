@@ -192,9 +192,6 @@ we can get a sense of what the actual workflow would look like.
 To do this we are going to use a method that is very similar to that in 
 `cal_prepare_calibration_windows`
 
-```{r}
-plot_drift(drift_examples)
-```
 
 ```{r}
 # bind the examples
