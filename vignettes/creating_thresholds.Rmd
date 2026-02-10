@@ -51,7 +51,7 @@ This vignette demonstrates how to use previously collected sensor data to create
 
 **Threshold Creation:** Using historical data to define what "normal" looks like.
 
-**Flagging:** Applying those definitions to new data to catch anomalies.
+**Flagging:** Applying those defined thresholds to new data to flag anomalies.
 
 ## Input Data Structure
 
