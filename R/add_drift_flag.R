@@ -42,7 +42,7 @@
 
 add_drift_flag <- function(df) {
 
-  if (!unique(df$parameter) %in% c("FDOM Fluorescence", "Turbidity", "Chl-a Fluorescence")) {
+  if (!unique(df$parameter) %in% c( "Turbidity", "Chl-a Fluorescence")) {
     return(df)
   }
 
@@ -54,21 +54,20 @@ add_drift_flag <- function(df) {
 
   # Progressive drift helper
   progressive_drift <- function(x) {
-    #Don't calculate if there are less than 4 points or less than 90% of data is present
-    if(length(x) < 4) return(0)
+    #Don't calculate if there are less than 10 points or less than 90% of data is present
+    if(length(x) < 10) return(0)
     if (sum(!is.na(x)) < ceiling(0.9 * length(x))) return(0)
     #Compute linear model & extract slope
     model <- lm(x ~ seq_along(x), na.action = na.omit)
     slope <- coef(model)[2]
 
-    if (param != "FDOM Fluorescence" && slope <= 0) return(0)
-    if (param == "FDOM Fluorescence" && slope >  0) return(0)
+    if (slope <= 0) return(0)
     #extract r^2
     summary(model)$r.squared
   }
 
-  # Steady drift check helper (looking for when R2 is consistently high (>0.6))
-  too_steady <- function(x) mean(x, na.rm = TRUE) >= 0.60
+  # Steady drift check helper (looking for when R2 is consistently high (>0.5))
+  too_steady <- function(x) mean(x, na.rm = TRUE) >= 0.5
   # Regex to identify site visit flags
   visit_regex <- "(site\\s*visit|\\bsv\\b)"
 
